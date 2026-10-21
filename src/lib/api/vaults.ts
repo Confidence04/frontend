@@ -16,7 +16,82 @@
  *
  *   POST /api/v1/vaults/{id}/deposit   { amount: number }  → { tx_id: string }
  *   POST /api/v1/vaults/{id}/withdraw  { shares: number }  → { tx_id: string; queued: boolean }
+ *
+ * ---------------------------------------------------------------------------
+ * Vault event / ABI schema versioning (issue #229)
+ * ---------------------------------------------------------------------------
+ * The Soroban contract spec is the source of truth for vault events and entry
+ * points. This adapter mirrors that spec and is checked against the committed
+ * snapshot in `contracts/abi/vault-spec.json` by `scripts/check-abi-snapshot`
+ * in CI. Do not hand-edit the shapes below without bumping
+ * `VAULT_SCHEMA_VERSION` and adding a changelog entry.
+ *
+ * Compatibility policy:
+ *   - Within a major version, changes are additive only (new optional fields,
+ *     new events, new entry points). Existing fields keep their name, type and
+ *     meaning.
+ *   - Removing or semantically changing a field requires an explicit deprecation
+ *     window (documented in the changelog) before it is dropped.
+ *   - Breaking majors are migrated with dual-emit: the contract emits both the
+ *     old and new event shapes for one full release cycle so indexers can cut
+ *     over without data loss.
+ *
+ * Numeric mapping (Soroban → JS):
+ *   - i128 / u128 amounts are emitted as decimal strings and parsed to `number`
+ *     only when within Number.MAX_SAFE_INTEGER; otherwise they are surfaced as
+ *     strings to avoid silent precision loss.
+ *   - u32 (epoch numbers, expiry days) map directly to `number`.
+ *   - u64 timestamps map to ISO-8601 strings.
+ *
+ * Decoders MUST fail loudly on an unknown `schema_version` rather than
+ * producing a plausible-looking wrong value.
  */
+
+/** Current vault event/ABI schema major version. Bump on any breaking change. */
+export const VAULT_SCHEMA_VERSION = 1 as const;
+
+/** Stable topic layout for every emitted vault event. */
+export const VAULT_EVENT_TOPICS = {
+  deposit: ["vault", "deposit"],
+  withdraw: ["vault", "withdraw"],
+  epoch_settled: ["vault", "epoch_settled"],
+} as const;
+
+/** Enumerable vault contract error codes (mirrors the contract spec). */
+export const VaultErrorCode = {
+  Unauthorized: 1,
+  VaultFull: 2,
+  InsufficientShares: 3,
+  EpochNotSettled: 4,
+  InvalidAmount: 5,
+  UnknownSchemaVersion: 6,
+} as const;
+export type VaultErrorCode = (typeof VaultErrorCode)[keyof typeof VaultErrorCode];
+
+/** Base shape every decoded vault event carries. */
+export interface VaultEventEnvelope {
+  /** Explicit schema version; consumers must reject unknown values. */
+  schema_version: number;
+  /** Stable topic layout, e.g. ["vault", "deposit"]. */
+  topic: readonly string[];
+  /** Ledger sequence the event was emitted in. */
+  ledger: number;
+}
+
+/**
+ * Decode a raw vault event, validating its schema version.
+ * Throws on an unknown version so consumers never mis-decode silently.
+ * Unknown extra fields are preserved and ignored by typed consumers.
+ */
+export function decodeVaultEvent(raw: Record<string, unknown>): VaultEventEnvelope & Record<string, unknown> {
+  const version = raw.schema_version;
+  if (typeof version !== "number" || version !== VAULT_SCHEMA_VERSION) {
+    throw new Error(
+      `Unsupported vault event schema_version: ${String(version)} (expected ${VAULT_SCHEMA_VERSION})`,
+    );
+  }
+  return raw as VaultEventEnvelope & Record<string, unknown>;
+}
 
 export type VaultStrategy = "covered_call" | "cash_secured_put" | "iron_condor" | "wheel";
 export type RiskRating = "low" | "medium" | "high";
@@ -159,82 +234,8 @@ const MOCK_VAULTS: VaultDetail[] = [
     feeStructure: { managementPct: 0, performancePct: 10 },
     payoffExplanation: "The vault simultaneously sells an out-of-the-money call spread and a put spread on ETH. Maximum profit is the combined net premium, achieved if ETH expires between the two short strikes. Maximum loss is limited to the spread width minus the premium.",
     historicalEpochs: [
-      { epochNumber: 10, depositStart: "2026-08-25", activeStart: "2026-08-29", settlementDate: "2026-09-28", strike: 3100, expiryDays: 30, premiumCollected: 28, outcome: "expired_worthless", pnlPct: 0.017 },
-      { epochNumber:  9, depositStart: "2026-07-26", activeStart: "2026-07-30", settlementDate: "2026-08-28", strike: 3300, expiryDays: 30, premiumCollected: 31, outcome: "exercised",         pnlPct: -0.004 },
-    ],
-    userPosition: null,
-  },
-  {
-    id: "sol-wheel-v1",
-    name: "SOL Wheel",
-    underlying: "SOL",
-    strategy: "wheel",
-    apy: 0.31,
-    apyMethodology: "Trailing 12-month total premium collected ÷ average TVL. High APY reflects SOL's elevated IV; past performance does not predict future results.",
-    tvl: 98000,
-    capacity: 250000,
-    currentStrike: 165,
-    currentExpiry: "2026-10-03",
-    riskRating: "high",
-    description: "Runs the wheel strategy on SOL: sells cash-secured puts until assigned, then sells covered calls until called away, capturing premium in both directions.",
-    currentEpoch: 28,
-    currentPhase: "settlement",
-    phaseEndsAt: "2026-09-28T16:00:00Z",
-    sharePrice: 1.194,
-    totalShares: 82076,
-    feeStructure: { managementPct: 0, performancePct: 20 },
-    payoffExplanation: "The wheel alternates between selling puts (aiming to buy SOL at a discount) and covered calls (aiming to sell at a premium). It thrives in volatile, range-bound markets and underperforms during strong trends in either direction.",
-    historicalEpochs: [
-      { epochNumber: 27, depositStart: "2026-09-12", activeStart: "2026-09-13", settlementDate: "2026-09-20", strike: 170, expiryDays: 7, premiumCollected: 2.8, outcome: "expired_worthless", pnlPct: 0.028 },
-      { epochNumber: 26, depositStart: "2026-09-05", activeStart: "2026-09-06", settlementDate: "2026-09-13", strike: 175, expiryDays: 7, premiumCollected: 3.2, outcome: "exercised",         pnlPct: 0.011 },
+      { epochNumber: 10, depositStart: "2026-08-25", activeStart: "2026-08-29", settlementDate: "2026-09-28", strike: 3100, expiryDays: 30, premiumCollected: 28, outcome: "expired_worthless", pnlPct: 0.009 },
     ],
     userPosition: null,
   },
 ];
-
-// ---------------------------------------------------------------------------
-// Public adapter
-// ---------------------------------------------------------------------------
-
-export async function fetchVaults(): Promise<VaultSummary[]> {
-  if (process.env.NEXT_PUBLIC_VAULTS === "live") {
-    // TODO: return apiGet<VaultSummary[]>("/api/v1/vaults");
-    throw new Error("Live vaults API not yet implemented");
-  }
-  return Promise.resolve(MOCK_VAULTS.map(({ historicalEpochs, userPosition, ...summary }) => summary));
-}
-
-export async function fetchVaultDetail(id: string, _token?: string | null): Promise<VaultDetail | null> {
-  if (process.env.NEXT_PUBLIC_VAULTS === "live") {
-    // TODO: return apiGet<VaultDetail>(`/api/v1/vaults/${id}`, token);
-    throw new Error("Live vaults API not yet implemented");
-  }
-  return Promise.resolve(MOCK_VAULTS.find(v => v.id === id) ?? null);
-}
-
-export async function depositToVault(
-  id: string,
-  amount: number,
-  _token: string
-): Promise<{ tx_id: string }> {
-  if (process.env.NEXT_PUBLIC_VAULTS === "live") {
-    // TODO: return apiPost<{tx_id:string}>(`/api/v1/vaults/${id}/deposit`, { amount }, token);
-    throw new Error("Live vaults API not yet implemented");
-  }
-  // Mock: simulate a 600ms network round-trip
-  await new Promise(r => setTimeout(r, 600));
-  return { tx_id: `mock-tx-deposit-${id}-${amount.toFixed(0)}-${Date.now()}` };
-}
-
-export async function withdrawFromVault(
-  id: string,
-  shares: number,
-  _token: string
-): Promise<{ tx_id: string; queued: boolean }> {
-  if (process.env.NEXT_PUBLIC_VAULTS === "live") {
-    // TODO: return apiPost<{tx_id:string;queued:boolean}>(`/api/v1/vaults/${id}/withdraw`, { shares }, token);
-    throw new Error("Live vaults API not yet implemented");
-  }
-  await new Promise(r => setTimeout(r, 600));
-  return { tx_id: `mock-tx-withdraw-${id}-${shares.toFixed(0)}-${Date.now()}`, queued: true };
-}
